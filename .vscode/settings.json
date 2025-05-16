@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "cycfg_pins.h": "c",
+        "cy_pdl.h": "c"
+    }
+}

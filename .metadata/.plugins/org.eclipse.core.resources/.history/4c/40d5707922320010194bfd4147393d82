@@ -1,0 +1,242 @@
+/**
+ * PSoC 62S2 MQTT LED Toggle Application
+ *
+ * This application connects to Wi-Fi and an MQTT broker, then subscribes to
+ * a topic to receive toggle commands for an LED.
+ *
+ * Author: JK Engineer
+ * Date: May 15, 2025
+ */
+
+#include "cy_pdl.h"
+#include "cyhal.h"
+#include "cybsp.h"
+#include "cy_retarget_io.h"
+#include "cy_wcm.h"
+#include "mqtt_client.h"
+
+/* Wi-Fi Credentials - Replace with your network details */
+#define WIFI_SSID           "YourWiFiSSID"
+#define WIFI_PASSWORD       "YourWiFiPassword"
+#define WIFI_SECURITY       CY_WCM_SECURITY_WPA2_AES_PSK
+
+/* MQTT Broker Settings */
+#define MQTT_BROKER_URL     "mqtt://192.168.1.100"  // Replace with your MQTT broker IP
+#define MQTT_BROKER_PORT    1883
+#define MQTT_CLIENT_ID      "psoc_62s2_device"
+#define MQTT_TOPIC_SUBSCRIBE "psoc/led/toggle"
+#define MQTT_QOS            1
+
+/* LED Pin Configuration */
+#define LED_PIN             CYBSP_USER_LED
+
+/* Global Variables */
+static cy_mqtt_client_handle_t mqtt_handle;
+static cyhal_gpio_t led_pin = LED_PIN;
+static bool led_state = false;
+
+/* Function Prototypes */
+static void connect_to_wifi(void);
+static void init_mqtt_client(void);
+static void mqtt_event_callback(cy_mqtt_event_t event, void *data);
+static void toggle_led(void);
+
+/**
+ * Main application entry point
+ */
+int main(void)
+{
+    cy_rslt_t result;
+
+    /* Initialize the board support package */
+    result = cybsp_init();
+    if (result != CY_RSLT_SUCCESS) {
+        /* BSP initialization failed. Stop program execution */
+        CY_ASSERT(0);
+    }
+
+    /* Enable global interrupts */
+    __enable_irq();
+
+    /* Initialize retarget-io for UART logging */
+    result = cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
+    if (result != CY_RSLT_SUCCESS) {
+        /* Retarget IO initialization failed. Stop program execution */
+        CY_ASSERT(0);
+    }
+
+    /* Initialize LED pin as output */
+    result = cyhal_gpio_init(led_pin, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, 0);
+    if (result != CY_RSLT_SUCCESS) {
+        printf("LED GPIO initialization failed!\r\n");
+        CY_ASSERT(0);
+    }
+
+    printf("\r\n***** PSoC 62S2 MQTT LED Toggle Application *****\r\n\r\n");
+
+    /* Connect to Wi-Fi network */
+    connect_to_wifi();
+
+    /* Initialize and connect MQTT client */
+    init_mqtt_client();
+
+    /* Main application loop */
+    for (;;) {
+        /* Process MQTT events */
+        cy_mqtt_process_events(&mqtt_handle, 1000);
+
+        /* Can add other periodic tasks here */
+        cyhal_system_delay_ms(10);
+    }
+}
+
+/**
+ * Function to connect to Wi-Fi network
+ *
+ * Initializes the Wi-Fi Connection Manager and connects to the configured network
+ */
+static void connect_to_wifi(void)
+{
+    cy_rslt_t result;
+    cy_wcm_config_t wifi_config = {
+        .interface = CY_WCM_INTERFACE_TYPE_STA
+    };
+    cy_wcm_connect_params_t wifi_conn_param;
+    cy_wcm_ip_address_t ip_address;
+
+    /* Initialize Wi-Fi Connection Manager */
+    result = cy_wcm_init(&wifi_config);
+    if (result != CY_RSLT_SUCCESS) {
+        printf("Wi-Fi Connection Manager initialization failed! Error: %lx\r\n", result);
+        CY_ASSERT(0);
+    }
+    printf("Wi-Fi Connection Manager initialized.\r\n");
+
+    /* Set up connection parameters */
+    memset(&wifi_conn_param, 0, sizeof(cy_wcm_connect_params_t));
+    memcpy(wifi_conn_param.ap_credentials.SSID, WIFI_SSID, strlen(WIFI_SSID));
+    memcpy(wifi_conn_param.ap_credentials.password, WIFI_PASSWORD, strlen(WIFI_PASSWORD));
+    wifi_conn_param.ap_credentials.security = WIFI_SECURITY;
+
+    /* Connect to Wi-Fi network */
+    printf("Connecting to Wi-Fi network: %s\r\n", WIFI_SSID);
+    result = cy_wcm_connect_ap(&wifi_conn_param, &ip_address);
+    if (result != CY_RSLT_SUCCESS) {
+        printf("Failed to connect to Wi-Fi network! Error: %lx\r\n", result);
+        CY_ASSERT(0);
+    }
+
+    /* Print IP address */
+    printf("Successfully connected to Wi-Fi network.\r\n");
+    printf("IP Address: %d.%d.%d.%d\r\n",
+            (uint8_t)(ip_address.ip.v4 & 0x000000FF),
+            (uint8_t)((ip_address.ip.v4 & 0x0000FF00) >> 8),
+            (uint8_t)((ip_address.ip.v4 & 0x00FF0000) >> 16),
+            (uint8_t)((ip_address.ip.v4 & 0xFF000000) >> 24));
+}
+
+/**
+ * Function to initialize and connect MQTT client
+ *
+ * Sets up MQTT client, connects to broker, and subscribes to the toggle topic
+ */
+static void init_mqtt_client(void)
+{
+    cy_rslt_t result;
+    cy_mqtt_connect_info_t connect_info;
+    cy_mqtt_subscribe_info_t subscribe_info;
+
+    /* Initialize MQTT client */
+    result = cy_mqtt_init();
+    if (result != CY_RSLT_SUCCESS) {
+        printf("MQTT client initialization failed! Error: %lx\r\n", result);
+        CY_ASSERT(0);
+    }
+    printf("MQTT client initialized.\r\n");
+
+    /* Set connection parameters */
+    memset(&connect_info, 0, sizeof(cy_mqtt_connect_info_t));
+    connect_info.client_id = MQTT_CLIENT_ID;
+    connect_info.keep_alive_sec = 60;
+    connect_info.clean_session = true;
+    connect_info.port = MQTT_BROKER_PORT;
+    connect_info.server_addr = MQTT_BROKER_URL;
+
+    /* Connect to MQTT broker */
+    printf("Connecting to MQTT broker: %s:%d\r\n", MQTT_BROKER_URL, MQTT_BROKER_PORT);
+    result = cy_mqtt_connect(&mqtt_handle, &connect_info, mqtt_event_callback, NULL);
+    if (result != CY_RSLT_SUCCESS) {
+        printf("MQTT connection failed! Error: %lx\r\n", result);
+        CY_ASSERT(0);
+    }
+    printf("Connected to MQTT broker.\r\n");
+
+    /* Subscribe to LED toggle topic */
+    memset(&subscribe_info, 0, sizeof(cy_mqtt_subscribe_info_t));
+    subscribe_info.qos = MQTT_QOS;
+    subscribe_info.topic = MQTT_TOPIC_SUBSCRIBE;
+    subscribe_info.topic_len = strlen(MQTT_TOPIC_SUBSCRIBE);
+
+    printf("Subscribing to topic: %s\r\n", MQTT_TOPIC_SUBSCRIBE);
+    result = cy_mqtt_subscribe(&mqtt_handle, &subscribe_info, 1);
+    if (result != CY_RSLT_SUCCESS) {
+        printf("MQTT subscription failed! Error: %lx\r\n", result);
+        CY_ASSERT(0);
+    }
+    printf("Subscribed to topic successfully.\r\n");
+}
+
+/**
+ * MQTT Event Callback
+ *
+ * Handles MQTT events such as incoming messages
+ *
+ * @param event The MQTT event type
+ * @param data Data associated with the event
+ */
+static void mqtt_event_callback(cy_mqtt_event_t event, void *data)
+{
+    cy_mqtt_publish_info_t *publish_info;
+
+    switch (event) {
+        case CY_MQTT_EVENT_CONNECT:
+            printf("MQTT connection established.\r\n");
+            break;
+
+        case CY_MQTT_EVENT_DISCONNECT:
+            printf("MQTT connection lost. Attempting to reconnect...\r\n");
+            /* Could add reconnection logic here */
+            break;
+
+        case CY_MQTT_EVENT_PUBLISH_RECEIVE:
+            publish_info = (cy_mqtt_publish_info_t *)data;
+            printf("Message received on topic: %.*s\r\n",
+                  publish_info->topic_len, publish_info->topic);
+
+            /* Check if this is our toggle topic */
+            if (strncmp(publish_info->topic, MQTT_TOPIC_SUBSCRIBE, publish_info->topic_len) == 0) {
+                printf("Toggle command received. Toggling LED...\r\n");
+                toggle_led();
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/**
+ * Function to toggle the LED state
+ *
+ * Inverts the current state of the LED and updates the hardware
+ */
+static void toggle_led(void)
+{
+    /* Toggle LED state */
+    led_state = !led_state;
+
+    /* Update physical LED */
+    cyhal_gpio_write(led_pin, led_state);
+
+    printf("LED state changed to: %s\r\n", led_state ? "ON" : "OFF");
+}
